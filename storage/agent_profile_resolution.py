@@ -31,6 +31,7 @@ from openhands.sdk.llm.utils.openhands_provider import (
     canonicalize_openhands_llm_payload,
 )
 from openhands.sdk.mcp.config import MCPServer
+from openhands.sdk.skills import load_public_skills
 from server.constants import LITE_LLM_API_URL, canonicalize_bundled_proxy_llm
 from storage.mcp_config import coerce_persisted_mcp_config
 
@@ -248,7 +249,10 @@ def org_launch_stores(
         ),
         llm_profile_names=lambda: list(profiles.profiles),
         mcp_config=mcp_config,
-        skills=lambda: [],
+        # Process-local user skills belong to the Enterprise service account,
+        # not the authenticated tenant. Tenant-scoped skills are loaded later
+        # inside the sandbox.
+        skills=lambda: list(load_public_skills()),
     )
 
 

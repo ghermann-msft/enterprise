@@ -23,6 +23,7 @@ from server.auth.saas_user_auth import (
     decode_oauth_v2_cookie,
     token_manager,
 )
+from server.auth.trusted_identity import get_trusted_identity_service
 from server.constants import REQUIRE_VERIFIED_EMAILS
 from server.routes.auth import set_response_cookie
 from server.routes.oauth_v2 import _set_oauth_v2_cookie
@@ -184,6 +185,12 @@ class SetAuthCookieMiddleware:
         mcp_auth_header = request.headers.get('X-Session-API-Key')
         api_auth_header = request.headers.get('X-Access-Token')
         api_key_cookie = request.cookies.get('api_key')
+        trusted_identity_service = get_trusted_identity_service()
+        trusted_identity_assertion = (
+            request.headers.get(trusted_identity_service.header)
+            if trusted_identity_service is not None
+            else None
+        )
         accepted_tos: bool | None = False
         if (
             v2_cookie is None
@@ -192,6 +199,7 @@ class SetAuthCookieMiddleware:
             and mcp_auth_header is None
             and api_auth_header is None
             and api_key_cookie is None
+            and trusted_identity_assertion is None
         ):
             raise NoCredentialsError
 

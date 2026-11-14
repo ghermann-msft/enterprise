@@ -42,6 +42,7 @@ from server.auth.constants import (
     KEYCLOAK_SERVER_URL_EXT,
     RECAPTCHA_SITE_KEY,
     ROLE_CHECK_ENABLED,
+    is_canvas_integrations_enabled,
 )
 from server.auth.cookie_chunking import (
     delete_chunked_cookie,
@@ -884,6 +885,10 @@ async def keycloak_offline_callback(code: str, state: str, request: Request):
 async def github_dummy_callback(request: Request):
     """Callback for GitHub that just forwards the user to the app base URL."""
     web_url = get_web_url(request)
+    if is_canvas_integrations_enabled():
+        return RedirectResponse(
+            f'{web_url}/canvas/settings/integrations', status_code=302
+        )
     return RedirectResponse(web_url, status_code=302)
 
 

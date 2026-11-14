@@ -126,11 +126,24 @@ class SaasAppLifespanService(AppLifespanService):
             deployment_kind=('local' if DEPLOYMENT_MODE == 'self_hosted' else 'remote'),
             license_key_configured=_env_flag('LICENSE_KEY_CONFIGURED'),
         )
+        await self._reconcile_trusted_identity_mappings()
         await self._reconcile_org_condenser_defaults()
         await self._check_role_names()
         await self._prepare_sandbox_specs()
         get_license_service().start()
         return self
+
+    async def _reconcile_trusted_identity_mappings(self) -> None:
+        from storage.trusted_identity_mapping_store import (
+            reconcile_trusted_identity_mappings_from_env,
+        )
+
+        count = await reconcile_trusted_identity_mappings_from_env()
+        if count:
+            logger.info(
+                'trusted_identity_mappings_reconciled',
+                extra={'mapping_count': count},
+            )
 
     async def _check_role_names(self) -> None:
         """Log an ERROR for each ``role`` row that has no ``RoleName``.

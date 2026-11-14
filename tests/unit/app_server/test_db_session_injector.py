@@ -11,7 +11,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from pydantic import SecretStr
@@ -33,6 +33,7 @@ with patch.dict(
     },
 ):
     from openhands.app_server.services.db_session_injector import (
+        AZURE_POSTGRES_SCOPE,
         DbSessionInjector,
     )
     from openhands.db.session_timezone import (
@@ -181,6 +182,22 @@ class TestDbSessionInjectorConfiguration:
 
             assert service.pool_use_lifo is expected
 
+    @pytest.mark.parametrize(
+        ('env_value', 'expected'),
+        [
+            ('true', True),
+            ('1', True),
+            ('yes', True),
+            ('false', False),
+            ('0', False),
+        ],
+    )
+    def test_azure_identity_env_var(self, temp_persistence_dir, env_value, expected):
+        with patch.dict(os.environ, {'DB_AZURE_IDENTITY': env_value}):
+            service = DbSessionInjector(persistence_dir=temp_persistence_dir)
+
+        assert service.azure_identity is expected
+
     def test_explicit_values_override_env_vars(self, temp_persistence_dir):
         """Test that explicitly provided values override environment variables."""
         env_vars = {
@@ -292,6 +309,133 @@ class TestDbSessionInjectorConnections:
             assert call_args[1]['max_overflow'] == 10
             assert call_args[1]['pool_pre_ping']
             assert call_args[1]['pool_use_lifo'] is True
+
+    def test_password_connection_does_not_create_azure_credential(
+        self, postgres_db_session_injector
+    ):
+        with patch.object(
+            DbSessionInjector, '_get_azure_credential'
+        ) as get_azure_credential:
+            postgres_db_session_injector.get_db_engine()
+
+        get_azure_credential.assert_not_called()
+
+    def test_azure_engine_selection(self, temp_persistence_dir):
+        service = DbSessionInjector(
+            persistence_dir=temp_persistence_dir,
+            host='azure.postgres.database.azure.com',
+            azure_identity=True,
+        )
+        engine = MagicMock()
+        with patch.object(
+            DbSessionInjector, '_create_azure_engine', return_value=engine
+        ) as create_azure_engine:
+            assert service.get_db_engine() is engine
+
+        create_azure_engine.assert_called_once_with()
+
+    def test_azure_connection_refreshes_token_for_each_physical_connection(
+        self, temp_persistence_dir
+    ):
+        service = DbSessionInjector(
+            persistence_dir=temp_persistence_dir,
+            host='azure.postgres.database.azure.com',
+            port=5432,
+            name='test_db',
+            user='test-user',
+            azure_identity=True,
+            ssl_mode='require',
+        )
+        credential = MagicMock()
+        credential.get_token.side_effect = [
+            MagicMock(token='token-1'),
+            MagicMock(token='token-2'),
+        ]
+        service._azure_credential = credential
+
+        with patch('pg8000.connect', return_value=MagicMock()) as connect:
+            service._create_azure_db_connection()
+            service._create_azure_db_connection()
+
+        assert [call.kwargs['password'] for call in connect.call_args_list] == [
+            'token-1',
+            'token-2',
+        ]
+        assert connect.call_args.kwargs == {
+            'host': 'azure.postgres.database.azure.com',
+            'port': 5432,
+            'database': 'test_db',
+            'user': 'test-user',
+            'password': 'token-2',
+            'ssl_context': True,
+            'startup_params': {'timezone': 'UTC'},
+        }
+        credential.get_token.assert_has_calls(
+            [call(AZURE_POSTGRES_SCOPE), call(AZURE_POSTGRES_SCOPE)]
+        )
+
+    @pytest.mark.asyncio
+    async def test_async_azure_connection_uses_token_and_ssl(
+        self, temp_persistence_dir
+    ):
+        service = DbSessionInjector(
+            persistence_dir=temp_persistence_dir,
+            host='azure.postgres.database.azure.com',
+            port=5432,
+            name='test_db',
+            user='test-user',
+            azure_identity=True,
+            ssl_mode='require',
+        )
+        with (
+            patch.object(
+                DbSessionInjector,
+                '_get_azure_postgres_token',
+                return_value='azure-token',
+            ),
+            patch.object(
+                DbSessionInjector._create_async_azure_db_connection.__globals__[
+                    'asyncpg'
+                ],
+                'connect',
+                new=AsyncMock(return_value=MagicMock()),
+            ) as connect,
+        ):
+            await service._create_async_azure_db_connection()
+
+        connect.assert_awaited_once_with(
+            host='azure.postgres.database.azure.com',
+            port=5432,
+            database='test_db',
+            user='test-user',
+            password='azure-token',
+            ssl='require',
+            server_settings={'timezone': 'UTC'},
+        )
+
+    def test_azure_token_error_is_not_hidden(self, temp_persistence_dir):
+        service = DbSessionInjector(
+            persistence_dir=temp_persistence_dir,
+            host='azure.postgres.database.azure.com',
+            azure_identity=True,
+        )
+        credential = MagicMock()
+        credential.get_token.side_effect = RuntimeError('identity unavailable')
+        service._azure_credential = credential
+
+        with pytest.raises(RuntimeError, match='identity unavailable'):
+            service._create_azure_db_connection()
+
+    def test_azure_identity_requires_host(self, temp_persistence_dir):
+        service = DbSessionInjector(
+            persistence_dir=temp_persistence_dir,
+            azure_identity=True,
+        )
+
+        with pytest.raises(
+            ValueError, match='DB_HOST is required when DB_AZURE_IDENTITY is enabled'
+        ):
+            service.get_db_engine()
 
     def test_postgres_connection_requires_ssl(self, temp_persistence_dir):
         service = DbSessionInjector(

@@ -22,6 +22,7 @@ from server.routes.auth import (
     _parse_signup_attribution,
     accept_tos,
     authenticate,
+    github_dummy_callback,
     keycloak_callback,
     keycloak_offline_callback,
     logout,
@@ -105,6 +106,45 @@ def test_set_response_cookie(mock_response, mock_request):
         assert token_data['access_token'] == 'test_access_token'
         assert token_data['refresh_token'] == 'test_refresh_token'
         assert token_data['accepted_tos'] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'env_name',
+    [
+        'ENABLE_CANVAS_INTEGRATIONS',
+        'OH_WEB_CLIENT_FEATURE_FLAGS_ENABLE_CANVAS_INTEGRATIONS',
+    ],
+)
+async def test_github_app_callback_returns_to_canvas_integrations(
+    mock_request, env_name
+):
+    with (
+        patch.dict('os.environ', {env_name: 'true'}, clear=True),
+        patch('server.routes.auth.get_web_url', return_value='https://halo.test'),
+    ):
+        result = await github_dummy_callback(mock_request)
+
+    assert result.status_code == status.HTTP_302_FOUND
+    assert (
+        result.headers['location'] == 'https://halo.test/canvas/settings/integrations'
+    )
+
+
+@pytest.mark.asyncio
+async def test_github_app_callback_preserves_existing_destination(mock_request):
+    with (
+        patch.dict(
+            'os.environ',
+            {'ENABLE_CANVAS_INTEGRATIONS': 'false'},
+            clear=True,
+        ),
+        patch('server.routes.auth.get_web_url', return_value='https://app.test'),
+    ):
+        result = await github_dummy_callback(mock_request)
+
+    assert result.status_code == status.HTTP_302_FOUND
+    assert result.headers['location'] == 'https://app.test'
 
 
 @pytest.mark.asyncio

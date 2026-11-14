@@ -134,6 +134,11 @@ def _get_github_app_slug() -> str | None:
     return slug if slug else None
 
 
+def _get_github_app_install_url() -> str | None:
+    slug = _get_github_app_slug()
+    return f'https://github.com/apps/{slug}/installations/new' if slug else None
+
+
 def _get_email_enabled() -> bool:
     """Return whether transactional email delivery is configured."""
     try:
@@ -216,7 +221,8 @@ def _get_feature_flags() -> WebClientFeatureFlags:
     Reads ENABLE_BILLING, HIDE_LLM_SETTINGS, ENABLE_JIRA, ENABLE_JIRA_DC,
     ENABLE_LINEAR, HIDE_USERS_PAGE, HIDE_BILLING_PAGE, HIDE_INTEGRATIONS_PAGE,
     HIDE_PERSONAL_WORKSPACES, OH_ENABLE_ONBOARDING, ENABLE_AGENT_CANVAS_BANNER,
-    ENABLE_BYOR_EXPORT, ENABLE_SUPER_ADMIN, ENABLE_OAUTH_V2_LOGIN,
+    ENABLE_CANVAS_INTEGRATIONS, ENABLE_BYOR_EXPORT, ENABLE_SUPER_ADMIN,
+    ENABLE_OAUTH_V2_LOGIN,
     ENABLE_AGENT_CONTEXT_PAGE, ENABLE_AGENT_PROFILES_PAGE,
     ENABLE_ORG_AGENT_PROFILES, ENABLE_MODEL_ROUTER, and ENABLE_SERVICE_ACCOUNTS
     from environment.
@@ -257,6 +263,8 @@ def _get_feature_flags() -> WebClientFeatureFlags:
         enable_onboarding=os.getenv('OH_ENABLE_ONBOARDING', 'false') == 'true',
         enable_automations=os.getenv('ENABLE_AUTOMATIONS', 'true') == 'true',
         enable_agent_canvas_banner=_env_flag_enabled('ENABLE_AGENT_CANVAS_BANNER'),
+        enable_canvas_integrations=_env_flag_enabled('ENABLE_CANVAS_INTEGRATIONS'),
+        github_app_install_url=_get_github_app_install_url(),
         enable_byor_export=_env_flag_enabled('ENABLE_BYOR_EXPORT'),
         enable_super_admin=_env_flag_enabled('ENABLE_SUPER_ADMIN'),
         enable_oauth_v2_login=_env_flag_enabled('ENABLE_OAUTH_V2_LOGIN'),
@@ -404,6 +412,7 @@ class DefaultWebClientConfigInjector(WebClientConfigInjector):
 
     async def get_web_client_config(self) -> WebClientConfig:
         from openhands.app_server.config import get_global_config
+        from server.auth.constants import is_canvas_integrations_enabled
 
         config = get_global_config()
         # Structured OH_WEB_CLIENT_FEATURE_FLAGS_* env builds feature_flags without
@@ -447,6 +456,14 @@ class DefaultWebClientConfigInjector(WebClientConfigInjector):
                 ),
                 'enable_integrated_idp': await _resolve_enable_integrated_idp(),
                 'enable_litellm': enable_litellm,
+                'enable_canvas_integrations': (
+                    self.feature_flags.enable_canvas_integrations
+                    or is_canvas_integrations_enabled()
+                ),
+                'github_app_install_url': (
+                    self.feature_flags.github_app_install_url
+                    or _get_github_app_install_url()
+                ),
                 # LiteLLM off means BYOK is the only LLM source; force it on
                 # regardless of OH_ALLOW_USER_LLM_CONFIGURATION.
                 'allow_user_llm_configuration': (

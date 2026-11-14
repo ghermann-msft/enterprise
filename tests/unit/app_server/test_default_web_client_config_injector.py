@@ -847,6 +847,65 @@ class TestGetGithubAppSlug:
             assert result is None
 
 
+class TestCanvasIntegrationsConfig:
+    def test_canvas_integrations_disabled_by_default(self):
+        from openhands.app_server.web_client.default_web_client_config_injector import (
+            _get_feature_flags,
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = _get_feature_flags()
+
+        assert result.enable_canvas_integrations is False
+        assert result.github_app_install_url is None
+
+    @pytest.mark.parametrize('value', ['true', '1'])
+    def test_canvas_integrations_exposes_github_app_install_url(self, value):
+        from openhands.app_server.web_client.default_web_client_config_injector import (
+            _get_feature_flags,
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                'ENABLE_CANVAS_INTEGRATIONS': value,
+                'GITHUB_APP_SLUG': 'openhands-halo',
+            },
+            clear=True,
+        ):
+            result = _get_feature_flags()
+
+        assert result.enable_canvas_integrations is True
+        assert (
+            result.github_app_install_url
+            == 'https://github.com/apps/openhands-halo/installations/new'
+        )
+
+    def test_structured_canvas_integrations_config_is_supported(self):
+        from openhands.agent_server.env_parser import from_env
+        from openhands.app_server.web_client.default_web_client_config_injector import (
+            DefaultWebClientConfigInjector,
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                'OH_WEB_CLIENT_FEATURE_FLAGS_ENABLE_CANVAS_INTEGRATIONS': 'true',
+                'OH_WEB_CLIENT_FEATURE_FLAGS_GITHUB_APP_INSTALL_URL': (
+                    'https://github.com/apps/openhands-halo/installations/new'
+                ),
+            },
+            clear=True,
+        ):
+            config = from_env(DefaultWebClientConfigInjector, 'OH_WEB_CLIENT')
+
+        assert config.feature_flags.enable_canvas_integrations is True
+        assert (
+            config.feature_flags.github_app_install_url
+            == 'https://github.com/apps/openhands-halo/installations/new'
+        )
+
+
 class TestIsGitlabEnabled:
     """Test cases for _is_gitlab_enabled helper function."""
 

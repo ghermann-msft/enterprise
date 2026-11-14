@@ -48,6 +48,10 @@ from server.auth.constants import (
 )
 from server.auth.cookie_chunking import read_chunked_cookie
 from server.auth.token_manager import TokenManager
+from server.auth.trusted_identity import (
+    TrustedIdentityError,
+    get_trusted_identity_service,
+)
 from server.logger import logger
 from server.rate_limit import RateLimiter, create_redis_rate_limiter
 from server.utils.rate_limit_utils import RATE_LIMIT_AUTH_WINDOWS
@@ -60,6 +64,7 @@ from storage.org_member import OrgMember
 from storage.org_store import OrgStore
 from storage.saas_secrets_store import SaasSecretsStore
 from storage.saas_settings_store import SaasSettingsStore
+from storage.trusted_identity_mapping import TrustedIdentityMapping
 from storage.user import ACCOUNT_TYPE_SERVICE, User
 from storage.user_authorization import UserAuthorizationType
 from storage.user_authorization_store import UserAuthorizationStore
@@ -1288,9 +1293,12 @@ class SaasUserAuth(UserAuth):
     @classmethod
     async def get_instance(cls, request: Request) -> UserAuth:
         logger.debug('saas_user_auth_get_instance')
-        # First we check for for an API Key...
-        logger.debug('saas_user_auth_get_instance:check_bearer')
-        instance = await saas_user_auth_from_bearer(request)
+        logger.debug('saas_user_auth_get_instance:check_trusted_identity')
+        instance = await saas_user_auth_from_trusted_identity(request)
+        if instance is None:
+            # Then we check for an API Key...
+            logger.debug('saas_user_auth_get_instance:check_bearer')
+            instance = await saas_user_auth_from_bearer(request)
         if instance is None:
             logger.debug('saas_user_auth_get_instance:check_cookie')
             instance = await saas_user_auth_from_cookie(request)
@@ -1441,6 +1449,59 @@ def get_api_key_from_header(request: Request):
     # Security note: This cookie MUST be marked `Secure; HttpOnly; SameSite=Strict`
     # (or `Lax`) to mitigate CSRF and XSS risks.
     return request.cookies.get('api_key')
+
+
+async def saas_user_auth_from_trusted_identity(
+    request: Request,
+) -> SaasUserAuth | None:
+    service = get_trusted_identity_service()
+    if service is None:
+        return None
+    try:
+        identity = service.verify_request(request)
+        async with a_session_maker() as session:
+            result = await session.execute(
+                select(TrustedIdentityMapping, User, OrgMember, Org)
+                .join(User, User.id == TrustedIdentityMapping.user_id)
+                .join(Org, Org.id == TrustedIdentityMapping.org_id)
+                .outerjoin(
+                    OrgMember,
+                    (OrgMember.user_id == TrustedIdentityMapping.user_id)
+                    & (OrgMember.org_id == TrustedIdentityMapping.org_id),
+                )
+                .where(
+                    TrustedIdentityMapping.tenant_id == identity.tenant_id,
+                    TrustedIdentityMapping.object_id == identity.object_id,
+                )
+            )
+            row = result.one_or_none()
+            if row is None:
+                raise TrustedIdentityError('Trusted identity is not mapped')
+            mapping, user, member, org = row
+            if not mapping.enabled:
+                raise TrustedIdentityError('Trusted identity mapping is disabled')
+            if user.is_disabled or user.deletion_pending:
+                raise TrustedIdentityError('Trusted identity user is disabled')
+            if member is None:
+                raise TrustedIdentityError(
+                    'Trusted identity is not a member of the mapped organization'
+                )
+            if member.status == 'inactive' or org.status == 'suspended':
+                raise TrustedIdentityError('Trusted identity tenant is inactive')
+        user_id = str(mapping.user_id)
+        instance = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr(''),
+            auth_type=AuthType.BEARER,
+            account_type=user.account_type,
+            _active_user_validated=True,
+        )
+        instance.set_effective_org_id_override(mapping.org_id)
+        return instance
+    except TrustedIdentityError:
+        raise
+    except Exception as exc:
+        raise TrustedIdentityError('Trusted identity authentication failed') from exc
 
 
 async def saas_user_auth_from_bearer(request: Request) -> SaasUserAuth | None:

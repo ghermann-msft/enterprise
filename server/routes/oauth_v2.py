@@ -52,7 +52,11 @@ from openhands.app_server.user_auth import (
 )
 from openhands.app_server.utils.http_session import httpx_verify_option
 from openhands.app_server.utils.logger import openhands_logger as logger
-from server.auth.constants import SUPER_ADMIN_EMAILS, is_oauth_v2_login_enabled
+from server.auth.constants import (
+    SUPER_ADMIN_EMAILS,
+    is_canvas_integrations_enabled,
+    is_oauth_v2_login_enabled,
+)
 from server.auth.git_token_check import (
     GitTokenCheckStatus,
     check_git_provider_token,
@@ -866,8 +870,13 @@ async def oauth_v2_link(
     _require_enabled_provider(provider)
     _require_oauth_provider(provider)
     web_url = get_web_url(request)
+    integrations_path = (
+        '/canvas/settings/integrations'
+        if is_canvas_integrations_enabled()
+        else '/settings/integrations'
+    )
     link_state = OAuthState(
-        redirect_url=f'{web_url}/settings/integrations',
+        redirect_url=f'{web_url}{integrations_path}',
         mode='link',
         user_id=user_id,
         nonce=secrets.token_urlsafe(32),

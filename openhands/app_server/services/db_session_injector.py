@@ -27,6 +27,7 @@ from openhands.db.ssl import build_asyncpg_connect_args, build_pg8000_connect_ar
 _logger = logging.getLogger(__name__)
 DB_SESSION_ATTR = 'db_session'
 DB_SESSION_KEEP_OPEN_ATTR = 'db_session_keep_open'
+AZURE_POSTGRES_SCOPE = 'https://ossrdbms-aad.database.windows.net/.default'
 
 
 class DbSessionInjector(BaseModel, Injector[AsyncSession]):
@@ -46,6 +47,7 @@ class DbSessionInjector(BaseModel, Injector[AsyncSession]):
     gcp_db_instance: str | None = None
     gcp_project: str | None = None
     gcp_region: str | None = None
+    azure_identity: bool = False
     ssl_mode: str | None = None
 
     # Private attrs
@@ -54,6 +56,7 @@ class DbSessionInjector(BaseModel, Injector[AsyncSession]):
     _session_maker: sessionmaker | None = PrivateAttr(default=None)
     _async_session_maker: async_sessionmaker | None = PrivateAttr(default=None)
     _gcp_connector: Any = PrivateAttr(default=None)
+    _azure_credential: Any = PrivateAttr(default=None)
 
     @model_validator(mode='after')
     def fill_empty_fields(self):
@@ -74,6 +77,9 @@ class DbSessionInjector(BaseModel, Injector[AsyncSession]):
             self.gcp_project = os.getenv('GCP_PROJECT')
         if self.gcp_region is None:
             self.gcp_region = os.getenv('GCP_REGION')
+        azure_identity = os.getenv('DB_AZURE_IDENTITY')
+        if azure_identity:
+            self.azure_identity = azure_identity.lower() in ('true', '1', 'yes')
         if self.ssl_mode is None:
             self.ssl_mode = os.getenv('DB_SSL_MODE') or os.getenv('PGSSLMODE')
         pool_size = os.getenv('DB_POOL_SIZE')
@@ -134,6 +140,95 @@ class DbSessionInjector(BaseModel, Injector[AsyncSession]):
             **build_asyncpg_timezone_args(),
         )
         return conn
+
+    def _get_azure_credential(self):
+        credential = self._azure_credential
+        if credential is None:
+            from azure.identity import DefaultAzureCredential
+
+            credential = DefaultAzureCredential()
+            self._azure_credential = credential
+        return credential
+
+    def _get_azure_postgres_token(self) -> str:
+        return self._get_azure_credential().get_token(AZURE_POSTGRES_SCOPE).token
+
+    def close_azure_credential(self) -> None:
+        credential = self._azure_credential
+        if credential is None:
+            return
+        try:
+            credential.close()
+        except Exception:
+            _logger.exception('Error closing Azure credential')
+        self._azure_credential = None
+
+    def _require_azure_host(self) -> None:
+        if not self.host:
+            raise ValueError('DB_HOST is required when DB_AZURE_IDENTITY is enabled')
+
+    def _create_azure_db_connection(self):
+        import pg8000
+
+        self._require_azure_host()
+        return pg8000.connect(
+            host=self.host,
+            port=self.port,
+            database=self.name,
+            user=self.user,
+            password=self._get_azure_postgres_token(),
+            **build_pg8000_connect_args(self.ssl_mode),
+            **build_pg8000_timezone_args(),
+        )
+
+    async def _create_async_azure_db_connection(self):
+        self._require_azure_host()
+        token = await asyncio.to_thread(self._get_azure_postgres_token)
+        return await asyncpg.connect(
+            host=self.host,
+            port=self.port,
+            database=self.name,
+            user=self.user,
+            password=token,
+            **build_asyncpg_connect_args(self.ssl_mode),
+            **build_asyncpg_timezone_args(),
+        )
+
+    def _create_azure_engine(self):
+        return create_engine(
+            'postgresql+pg8000://',
+            creator=self._create_azure_db_connection,
+            pool_size=self.pool_size,
+            max_overflow=self.max_overflow,
+            pool_pre_ping=True,
+            pool_recycle=self.pool_recycle,
+            pool_use_lifo=self.pool_use_lifo,
+        )
+
+    async def _create_async_azure_engine(self):
+        from sqlalchemy.dialects.postgresql.asyncpg import (
+            AsyncAdapt_asyncpg_connection,
+            AsyncAdapt_asyncpg_dbapi,
+        )
+
+        dbapi = AsyncAdapt_asyncpg_dbapi(asyncpg)
+
+        def adapted_creator():
+            return AsyncAdapt_asyncpg_connection(
+                dbapi,
+                await_only(self._create_async_azure_db_connection()),
+                prepared_statement_cache_size=100,
+            )
+
+        return create_async_engine(
+            'postgresql+asyncpg://',
+            creator=adapted_creator,
+            pool_size=self.pool_size,
+            max_overflow=self.max_overflow,
+            pool_pre_ping=True,
+            pool_recycle=self.pool_recycle,
+            pool_use_lifo=self.pool_use_lifo,
+        )
 
     def _create_gcp_engine(self):
         engine = create_engine(
@@ -202,6 +297,9 @@ class DbSessionInjector(BaseModel, Injector[AsyncSession]):
             return async_engine
         if self.gcp_db_instance:  # GCP environments
             async_engine = await self._create_async_gcp_engine()
+        elif self.azure_identity:
+            self._require_azure_host()
+            async_engine = await self._create_async_azure_engine()
         else:
             self._require_host()
             try:
@@ -241,6 +339,9 @@ class DbSessionInjector(BaseModel, Injector[AsyncSession]):
             return engine
         if self.gcp_db_instance:  # GCP environments
             engine = self._create_gcp_engine()
+        elif self.azure_identity:
+            self._require_azure_host()
+            engine = self._create_azure_engine()
         else:
             self._require_host()
             try:
@@ -382,6 +483,7 @@ class DbSessionInjector(BaseModel, Injector[AsyncSession]):
                     'Error closing GCP Cloud SQL connector', stack_info=True
                 )
             self._gcp_connector = None
+        self.close_azure_credential()
 
         engine = self._async_engine
         if engine is not None:

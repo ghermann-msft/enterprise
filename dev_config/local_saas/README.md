@@ -184,6 +184,13 @@ Edit `.env` and fill in the real values for secrets only:
 - `TAVILY_API_KEY` -- MCP search engine
 - `DB_PASS` -- local PostgreSQL password (default: `postgres`)
 
+For the embedded Canvas integrations page, also set the non-secret
+`GITHUB_APP_SLUG` and `ENABLE_CANVAS_INTEGRATIONS=true`. The GitHub App should
+use `/oauth/github/callback` as its setup/callback URL and
+`/integration/github/events` as its webhook URL. The web-client config then
+exposes the absolute GitHub App installation URL without exposing the app ID,
+private key, client secret, or webhook secret.
+
 All non-sensitive config (hostnames, ports, paths, feature flags) is baked
 into `.vscode/launch.json` inline via the `env` block, which overrides values
 from `.env`. This keeps secrets isolated in `.env` while sharing the rest.

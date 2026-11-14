@@ -159,3 +159,13 @@ def is_oauth_v2_login_enabled() -> bool:
     if value is None:
         value = os.getenv('ENABLE_OAUTH_V2_LOGIN', 'false')
     return value.lower() in ('true', '1')
+
+
+def is_canvas_integrations_enabled() -> bool:
+    return any(
+        os.getenv(name, 'false').lower() in ('true', '1')
+        for name in (
+            'ENABLE_CANVAS_INTEGRATIONS',
+            'OH_WEB_CLIENT_FEATURE_FLAGS_ENABLE_CANVAS_INTEGRATIONS',
+        )
+    )

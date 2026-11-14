@@ -3,6 +3,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from logging.config import fileConfig
+from pathlib import Path
 
 # Suppress alembic.runtime.plugins INFO logs during import to prevent non-JSON logs in production
 # These plugin setup messages would otherwise appear before logging is configured
@@ -19,6 +20,9 @@ from google.cloud.sql.connector import Connector  # noqa: E402
 from sqlalchemy import Engine, create_engine, text  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
+from openhands.app_server.services.db_session_injector import (  # noqa: E402
+    DbSessionInjector,
+)
 from openhands.db.session_timezone import (  # noqa: E402
     build_libpq_timezone_args,
     build_pg8000_timezone_args,
@@ -39,6 +43,11 @@ DB_NAME = os.getenv('DB_NAME', 'openhands')
 # migration failures surface before deploy. Set DB_DRIVER='' to use psycopg2.
 DB_DRIVER = os.getenv('DB_DRIVER', 'pg8000')
 DB_SSL_MODE = os.getenv('DB_SSL_MODE') or os.getenv('PGSSLMODE')
+DB_AZURE_IDENTITY = os.getenv('DB_AZURE_IDENTITY', 'false').lower() in (
+    'true',
+    '1',
+    'yes',
+)
 
 GCP_DB_INSTANCE = os.getenv('GCP_DB_INSTANCE')
 GCP_PROJECT = os.getenv('GCP_PROJECT')
@@ -63,6 +72,7 @@ def migration_engine(database: str = DB_NAME) -> Iterator[Engine]:
     outlive the run. A pooled connection would keep holding the advisory lock.
     """
     connector = None
+    azure_db_session = None
     if GCP_DB_INSTANCE:
         connector = Connector()
         instance_string = f'{GCP_PROJECT}:{GCP_REGION}:{GCP_DB_INSTANCE}'
@@ -80,6 +90,19 @@ def migration_engine(database: str = DB_NAME) -> Iterator[Engine]:
         engine = create_engine(
             'postgresql+pg8000://', creator=get_db_connection, poolclass=NullPool
         )
+    elif DB_AZURE_IDENTITY:
+        azure_db_session = DbSessionInjector(
+            persistence_dir=Path('.'),
+            host=DB_HOST,
+            port=int(DB_PORT),
+            name=database,
+            user=DB_USER,
+            azure_identity=True,
+            ssl_mode=DB_SSL_MODE,
+            pool_size=1,
+            max_overflow=0,
+        )
+        engine = azure_db_session.get_db_engine()
     else:
         scheme = f'postgresql+{DB_DRIVER}' if DB_DRIVER else 'postgresql'
         url = f'{scheme}://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{database}'
@@ -98,6 +121,8 @@ def migration_engine(database: str = DB_NAME) -> Iterator[Engine]:
         engine.dispose()
         if connector is not None:
             connector.close()
+        if azure_db_session is not None:
+            azure_db_session.close_azure_credential()
 
 
 def create_database_if_missing() -> None:

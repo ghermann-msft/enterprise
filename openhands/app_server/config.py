@@ -354,9 +354,15 @@ def config_from_env() -> AppServerConfig:
     if config.event_callback is None:
         config.event_callback = SQLEventCallbackServiceInjector()
 
+    sandbox_server_url = os.getenv('SANDBOX_SERVER_URL')
     if config.sandbox is None:
         # Legacy fallback
-        if os.getenv('RUNTIME') == 'remote':
+        if sandbox_server_url:
+            config.sandbox = RemoteSandboxServiceInjector(
+                api_key=os.getenv('SANDBOX_API_KEY', ''),
+                api_url=sandbox_server_url,
+            )
+        elif os.getenv('RUNTIME') == 'remote':
             config.sandbox = RemoteSandboxServiceInjector(
                 api_key=os.environ['SANDBOX_API_KEY'],
                 api_url=os.environ['SANDBOX_REMOTE_RUNTIME_API_URL'],
@@ -415,7 +421,7 @@ def config_from_env() -> AppServerConfig:
             config.sandbox = DockerSandboxServiceInjector(**docker_sandbox_kwargs)
 
     if config.sandbox_spec is None:
-        if os.getenv('RUNTIME') == 'remote':
+        if sandbox_server_url or os.getenv('RUNTIME') == 'remote':
             config.sandbox_spec = RemoteSandboxSpecServiceInjector()
         elif os.getenv('RUNTIME') == 'e2b':
             config.sandbox_spec = E2BSandboxSpecServiceInjector()

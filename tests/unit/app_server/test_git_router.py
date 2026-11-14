@@ -4,6 +4,7 @@ This module tests the git router endpoints,
 focusing on pagination and error handling.
 """
 
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -243,6 +244,33 @@ class TestSearchUserInstallations:
         # Assert
         assert result.items == ['inst-3', 'inst-4']
         assert result.next_page_id == encode_page_id(4)
+
+    @pytest.mark.asyncio
+    @patch('openhands.app_server.git.git_router.ProviderHandler')
+    async def test_scopes_installations_to_authenticated_user(self, mock_handler_cls):
+        mock_handler = _make_mock_provider_handler()
+        mock_handler_cls.return_value = mock_handler
+        provider_tokens = {
+            ProviderType.GITHUB: ProviderToken(
+                user_id='github-user', token='user-token'
+            )
+        }
+        mock_context = _make_mock_user_context(
+            provider_tokens=provider_tokens,
+            user_id='tenant-user-123',
+        )
+
+        await search_user_installations(
+            provider=ProviderType.GITHUB,
+            page_id=None,
+            limit=100,
+            user_context=mock_context,
+        )
+
+        call_kwargs = mock_handler_cls.call_args.kwargs
+        assert isinstance(call_kwargs['provider_tokens'], MappingProxyType)
+        assert dict(call_kwargs['provider_tokens']) == provider_tokens
+        assert call_kwargs['external_auth_id'] == 'tenant-user-123'
 
 
 @pytest.mark.asyncio

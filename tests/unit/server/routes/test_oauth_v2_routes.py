@@ -88,7 +88,7 @@ def no_email_match():
 
 def _override_user_context(app, user_id):
     """Override ``get_user_id`` so the route sees ``user_id`` (or ``None``)."""
-    app.dependency_overrides[get_user_id] = lambda: (str(user_id) if user_id else None)
+    app.dependency_overrides[get_user_id] = lambda: str(user_id) if user_id else None
 
 
 def _fake_provider(
@@ -2054,6 +2054,7 @@ def test_link_returns_start_url(app, client, jwt_svc):
     provider = _fake_provider()
     user_id = uuid4()
     with (
+        patch.dict('os.environ', {}, clear=True),
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
             oauth_v2.AuthProviderStore,
@@ -2090,6 +2091,64 @@ def test_link_returns_start_url(app, client, jwt_svc):
     assert cookie['path'] == '/oauth'
     assert cookie['max-age'] == str(oauth_v2.LINK_NONCE_COOKIE_MAX_AGE)
     assert oauth_v2.LINK_NONCE_COOKIE_MAX_AGE > oauth_v2.LINK_STATE_TTL_SECONDS
+
+
+@pytest.mark.parametrize(
+    'env_name',
+    [
+        'ENABLE_CANVAS_INTEGRATIONS',
+        'OH_WEB_CLIENT_FEATURE_FLAGS_ENABLE_CANVAS_INTEGRATIONS',
+    ],
+)
+def test_link_returns_to_canvas_integrations_when_enabled(
+    app, client, jwt_svc, env_name
+):
+    provider = _fake_provider()
+    with (
+        patch.dict('os.environ', {env_name: 'true'}, clear=True),
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+    ):
+        _override_user_context(app, uuid4())
+        response = client.post('/oauth/1/link')
+        state = parse_qs(urlsplit(response.json()['start_url']).query)['state'][0]
+        state_data = oauth_v2._decrypt_state(state)
+
+    assert state_data['redirect_url'] == (
+        'https://testserver/canvas/settings/integrations'
+    )
+
+
+@pytest.mark.parametrize(
+    'env_name',
+    [
+        'ENABLE_CANVAS_INTEGRATIONS',
+        'OH_WEB_CLIENT_FEATURE_FLAGS_ENABLE_CANVAS_INTEGRATIONS',
+    ],
+)
+def test_link_preserves_existing_destination_when_canvas_integrations_disabled(
+    app, client, jwt_svc, env_name
+):
+    provider = _fake_provider()
+    with (
+        patch.dict('os.environ', {env_name: 'false'}, clear=True),
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+    ):
+        _override_user_context(app, uuid4())
+        response = client.post('/oauth/1/link')
+        state = parse_qs(urlsplit(response.json()['start_url']).query)['state'][0]
+        state_data = oauth_v2._decrypt_state(state)
+
+    assert state_data['redirect_url'] == 'https://testserver/settings/integrations'
 
 
 def test_link_start_url_completes_in_the_browser_that_started_it(app, jwt_svc):
