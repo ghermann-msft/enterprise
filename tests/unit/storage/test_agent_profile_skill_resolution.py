@@ -27,7 +27,7 @@ def test_org_launch_stores_materializes_only_public_skill_catalog():
         patch(
             'storage.agent_profile_resolution.load_public_skills',
             return_value=[public_skill],
-        ),
+        ) as load_public,
         patch(
             'openhands.agent_server.skills_service.discover_profile_skills',
             return_value=[public_skill, process_user_skill],
@@ -35,5 +35,8 @@ def test_org_launch_stores_materializes_only_public_skill_catalog():
     ):
         stores = org_launch_stores(org, {})
         assert stores.skills() == [public_skill]
+        assert stores.public_skill_names is not None
+        assert stores.public_skill_names() == ('public-skill',)
 
+    load_public.assert_called_once_with()
     discover.assert_not_called()

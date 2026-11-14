@@ -243,6 +243,8 @@ def org_launch_stores(
 ) -> LaunchStores:
     """Adapt organization catalogs to the SDK launch resolver."""
     profiles = llm_profiles if llm_profiles is not None else load_llm_profiles(org)
+    public_skills = tuple(load_public_skills())
+    public_skill_names = tuple(skill.name for skill in public_skills)
     return LaunchStores(
         llm_profiles=OrgLLMProfileLoader(
             profiles, org=org, fallback_api_key=fallback_api_key
@@ -252,7 +254,8 @@ def org_launch_stores(
         # Process-local user skills belong to the Enterprise service account,
         # not the authenticated tenant. Tenant-scoped skills are loaded later
         # inside the sandbox.
-        skills=lambda: list(load_public_skills()),
+        skills=lambda: list(public_skills),
+        public_skill_names=lambda: public_skill_names,
     )
 
 

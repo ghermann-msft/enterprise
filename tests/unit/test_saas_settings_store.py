@@ -3364,6 +3364,213 @@ async def _seed_custom_member_with_managed_agent_profile(
     return str(profile.id)
 
 
+async def _seed_member_with_skill_profiles(async_session_maker, fixture):
+    from sqlalchemy import select
+
+    from openhands.app_server.settings.agent_profiles import AgentProfiles
+    from openhands.sdk.profiles import (
+        OpenHandsAgentProfile,
+        save_profile_preserving_identity,
+    )
+    from storage.org import Org
+    from storage.org_member import OrgMember
+    from storage.user import User
+
+    agent_profiles = AgentProfiles()
+    active = save_profile_preserving_identity(
+        agent_profiles,
+        OpenHandsAgentProfile(
+            name='active',
+            llm_profile_ref='Default',
+            public_skills=['public-selected'],
+            disabled_skills=['public-disabled', 'user-disabled'],
+        ),
+    )
+    override = save_profile_preserving_identity(
+        agent_profiles,
+        OpenHandsAgentProfile(
+            name='override',
+            llm_profile_ref='Default',
+            public_skills=[],
+        ),
+    )
+    all_public = save_profile_preserving_identity(
+        agent_profiles,
+        OpenHandsAgentProfile(
+            name='all-public',
+            llm_profile_ref='Default',
+            public_skills=None,
+        ),
+    )
+    async with async_session_maker() as session:
+        org = await session.get(Org, fixture['org_id'])
+        org.llm_profiles = {
+            'profiles': {
+                'Default': {
+                    'model': 'anthropic/claude-sonnet-4',
+                    'api_key': 'sk-profile',
+                }
+            },
+            'active': 'Default',
+        }
+        org.agent_profiles = agent_profiles.model_dump(
+            mode='json', context={'expose_secrets': True}
+        )
+        member = (
+            await session.execute(
+                select(OrgMember).where(
+                    OrgMember.org_id == fixture['org_id'],
+                    OrgMember.user_id == fixture['admin_user_id'],
+                )
+            )
+        ).scalar_one()
+        member.active_agent_profile_id = str(active.id)
+        user = await session.get(User, fixture['admin_user_id'])
+        user.disabled_skills = ['member-disabled']
+        await session.commit()
+    return str(active.id), str(override.id), str(all_public.id)
+
+
+def _public_profile_skill_catalog():
+    from openhands.sdk.skills import Skill
+
+    return [
+        Skill(name=name, content=name, source=f'/{name}/SKILL.md')
+        for name in (
+            'public-selected',
+            'public-unselected',
+            'public-disabled',
+        )
+    ]
+
+
+async def _launch_with_profile_skills(
+    async_session_maker, user_id, *, override_agent_profile_id=None
+):
+    with (
+        patch(
+            'storage.saas_settings_store.is_agent_profiles_enabled',
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            'storage.agent_profile_resolution.load_public_skills',
+            return_value=_public_profile_skill_catalog(),
+        ),
+    ):
+        return await _launch_settings(
+            async_session_maker,
+            user_id,
+            litellm=False,
+            override_agent_profile_id=override_agent_profile_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_launch_resolves_active_profile_skill_selection(
+    async_session_maker, org_with_multiple_members_fixture
+):
+    fixture = org_with_multiple_members_fixture
+    active_id, _, _ = await _seed_member_with_skill_profiles(
+        async_session_maker, fixture
+    )
+
+    loaded = await _launch_with_profile_skills(
+        async_session_maker, fixture['admin_user_id']
+    )
+
+    assert loaded is not None
+    assert loaded.active_agent_profile_id == active_id
+    assert loaded.active_agent_profile_revision == 1
+    assert [skill.name for skill in loaded.agent_settings.agent_context.skills] == [
+        'public-selected',
+    ]
+    assert loaded.agent_settings.agent_context.disabled_skills == [
+        'public-disabled',
+        'user-disabled',
+    ]
+    assert loaded.disabled_skills == ['member-disabled']
+
+
+@pytest.mark.asyncio
+async def test_launch_explicit_profile_override_controls_skill_selection(
+    async_session_maker, org_with_multiple_members_fixture
+):
+    fixture = org_with_multiple_members_fixture
+    active_id, override_id, _ = await _seed_member_with_skill_profiles(
+        async_session_maker, fixture
+    )
+
+    loaded = await _launch_with_profile_skills(
+        async_session_maker,
+        fixture['admin_user_id'],
+        override_agent_profile_id=override_id,
+    )
+
+    assert loaded is not None
+    assert loaded.active_agent_profile_id == override_id
+    assert loaded.active_agent_profile_id != active_id
+    assert loaded.active_agent_profile_revision == 1
+    assert loaded.agent_settings.agent_context.skills == []
+    assert loaded.agent_settings.agent_context.disabled_skills == []
+    assert loaded.disabled_skills == ['member-disabled']
+
+
+@pytest.mark.asyncio
+async def test_launch_profile_with_unset_public_skills_keeps_all_public_skills(
+    async_session_maker, org_with_multiple_members_fixture
+):
+    fixture = org_with_multiple_members_fixture
+    _, _, all_public_id = await _seed_member_with_skill_profiles(
+        async_session_maker, fixture
+    )
+
+    loaded = await _launch_with_profile_skills(
+        async_session_maker,
+        fixture['admin_user_id'],
+        override_agent_profile_id=all_public_id,
+    )
+
+    assert loaded is not None
+    assert loaded.active_agent_profile_id == all_public_id
+    assert [skill.name for skill in loaded.agent_settings.agent_context.skills] == [
+        'public-selected',
+        'public-unselected',
+        'public-disabled',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_launch_does_not_materialize_process_local_user_skills(
+    async_session_maker, org_with_multiple_members_fixture
+):
+    from openhands.sdk.skills import Skill
+
+    fixture = org_with_multiple_members_fixture
+    active_id, _, _ = await _seed_member_with_skill_profiles(
+        async_session_maker, fixture
+    )
+    server_user_skill = Skill(
+        name='server-account-user-skill',
+        content='must not cross tenant boundaries',
+        source='C:/server-account/.openhands/skills/private/SKILL.md',
+    )
+
+    with patch(
+        'openhands.agent_server.skills_service.discover_profile_skills',
+        return_value=[*_public_profile_skill_catalog(), server_user_skill],
+    ) as process_local_discovery:
+        loaded = await _launch_with_profile_skills(
+            async_session_maker, fixture['admin_user_id']
+        )
+
+    assert loaded is not None
+    assert loaded.active_agent_profile_id == active_id
+    assert [skill.name for skill in loaded.agent_settings.agent_context.skills] == [
+        'public-selected'
+    ]
+    process_local_discovery.assert_not_called()
+
+
 async def _set_admin_managed_key(async_session_maker, fixture, key: str) -> None:
     """Put a managed key in the admin's slot, as a finished start would."""
     from sqlalchemy import select
